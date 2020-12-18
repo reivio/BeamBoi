@@ -7,7 +7,8 @@ import tensorflow.keras.layers as layers
 import os
 import tempfile
 import time
-
+import glob
+import numpy as np
 
 FEATURE_KEYS = ['C'+str(i) for i in range(10)]
 print(f'Feature keys: {FEATURE_KEYS}')
@@ -41,7 +42,8 @@ class AnomalyDetector(tf.keras.Model):
     h_inner = features // 3
     latent = features // 5
     self.encoder = tf.keras.Sequential([
-      layers.Dense(h_outer, activation="relu"),
+      #layers.Reshape((1, features), input_shape=(features,)),
+      layers.Dense(h_outer, activation="relu", name="First_layer_asd"),
       layers.Dense(h_inner, activation="relu"),
       layers.Dense(latent, activation="relu")])
     
@@ -54,6 +56,7 @@ class AnomalyDetector(tf.keras.Model):
     encoded = self.encoder(x)
     decoded = self.decoder(encoded)
     return decoded
+
 
 class MapAndFilterErrors(beam.PTransform):
     """Like beam.Map but filters out errors in the map_fn."""
@@ -80,7 +83,6 @@ class MapAndFilterErrors(beam.PTransform):
 
     def expand(self, pcoll):
         return pcoll | beam.ParDo(self._MapAndFilterErrorsDoFn(self._fn))
-
 
 
 def preprocessing_fn(inputs):
@@ -128,20 +130,47 @@ def transform_data(train_data_file, working_dir):
 
 def _make_training_input_fn(tf_transform_output, transformed_examples, batch_size):
     def input_fn():
+        transformed_examples1 = os.path.join(transformed_examples, TRANSFORMED_TRAIN_DATA_FILEBASE + '*')
         dataset = tf.data.experimental.make_batched_features_dataset(
-            file_pattern=transformed_examples,
+            file_pattern=transformed_examples1,
             batch_size=batch_size,
             features=tf_transform_output.transformed_feature_spec(),
             reader=tf.data.TFRecordDataset,
             shuffle=True)
-        dataset = dataset.map(lambda *x: (tf.stack(x), tf.stack(x)))
-
+        """
+        print(transformed_examples)
+        print(TRANSFORMED_TRAIN_DATA_FILEBASE)
+        files = os.listdir(transformed_examples)
+        filenames = [os.path.join(transformed_examples, file) for file in files if file.startswith(TRANSFORMED_TRAIN_DATA_FILEBASE)]
+        print(filenames)
+        def _parse_function(example_proto):
+            # Parse the input `tf.train.Example` proto using the dictionary above.
+            return tf.io.parse_single_example(example_proto, features)
+        features = tf_transform_output.transformed_feature_spec()
+        dataset = tf.data.TFRecordDataset(filenames=filenames)
+        #dataset = dataset.apply(parsing_ops.parse_example_dataset(features))
+        dataset = dataset.map(_parse_function)
+        dataset = dataset.batch(batch_size).shuffle(1000)
+        dataset = dataset.map(lambda x: (tf.stack(x.values), tf.stack(x.values)))
+        #dataset = dataset.map(lambda x: (x, x))
+        """
         transformed_features = tf.compat.v1.data.make_one_shot_iterator(
             dataset).get_next()
         print("\ndada", type(transformed_features))
         #### !!!!!!!!
-        #return (transformed_features, transformed_features)
-        return transform_features
+        print(transformed_features)
+        #print(len(transformed_features))
+        #print(tf.stack(transformed_features))
+
+        #return (tf.stack(transformed_features), tf.stack(transformed_features))
+        #print(dataset)
+        #asd = dataset.take(1)
+        print('asd\nasd\nasd')
+        print(dataset)
+        #print(asd.take(1))
+        #return dataset, dataset
+        return np.array(list(transformed_features.values())) # .values
+        
     return input_fn()
 
 
@@ -172,7 +201,7 @@ def train_and_evaluate(working_dir, num_train_instances=NUM_TRAIN_INSTANCES,
     tf_transform_output = tft.TFTransformOutput(working_dir)
     
     n_feat = len(FEATURE_KEYS)
-    print(type(n_feat))
+    print(n_feat)
     autoencoder = AnomalyDetector(
         features=n_feat
     )
@@ -186,7 +215,7 @@ def train_and_evaluate(working_dir, num_train_instances=NUM_TRAIN_INSTANCES,
     print("asdasdsad")
     train_input_fn = _make_training_input_fn( 
         tf_transform_output,
-        os.path.join(working_dir, TRANSFORMED_TRAIN_DATA_FILEBASE + '*'),
+        working_dir,#os.path.join(working_dir, TRANSFORMED_TRAIN_DATA_FILEBASE + '*'),
         batch_size=1)
     print("Training±\n")
 
@@ -197,11 +226,12 @@ def train_and_evaluate(working_dir, num_train_instances=NUM_TRAIN_INSTANCES,
 
     autoencoder.fit(
         train_input_fn,
+        train_input_fn,
         epochs=TRAIN_NUM_EPOCHS)
     
     serving_input_fn = _make_serving_input_fn(tf_transform_output)
     exported_model_dir = os.path.join(working_dir, EXPORTED_MODEL_DIR)
-    estimator.export_saved_model(exported_model_dir, serving_input_fn)
+    #estimator.export_saved_model(exported_model_dir, serving_input_fn)
 
 
 temp = tempfile.gettempdir()
